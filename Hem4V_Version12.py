@@ -3,12 +3,14 @@ import sys
 import subprocess
 import shutil
 import urllib.request
+import json
 import tempfile
 import traceback
 import glob
 from datetime import datetime
 
-WORKDIR = r"C:\Hem4V"
+# Use a cross-platform directory inside the user's home folder
+WORKDIR = os.path.join(os.path.expanduser("~"), "Hem4V")
 LOGDIR = os.path.join(WORKDIR, "logs")
 LOGFILE = os.path.join(LOGDIR, f"log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
 
@@ -143,7 +145,7 @@ def find_python_entrypoint(target_dir):
         path = os.path.join(target_dir, fname)
         if os.path.isfile(path):
             return fname
-    pyfiles = [os.path.basename(f) for f in glob.glob(os.path.join(target_dir, "*.py"))]
+    pyfiles = [os.path.basename(f) for f in glob.glob(os.path.join(target_dir, "*.py")) if os.path.basename(f) != "setup.py"]
     if len(pyfiles) == 1:
         return pyfiles[0]
     elif len(pyfiles) > 1:
@@ -206,13 +208,25 @@ def do_workflow(repo_url):
 
         # 4. Instalacja zależności
         req_path = os.path.join(target_dir, "requirements.txt")
+        pyproject_path = os.path.join(target_dir, "pyproject.toml")
+        setup_path = os.path.join(target_dir, "setup.py")
         pkg_path = os.path.join(target_dir, "package.json")
+
         if os.path.isfile(req_path):
             log("Wykryto projekt Python (requirements.txt).")
             if not ensure_python():
                 return
             log("Instaluję zależności: pip install -r requirements.txt")
             exit_code = run_cmd([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], cwd=target_dir)
+            if exit_code != 0:
+                log_error("Błąd podczas instalowania zależności pip!")
+                return
+        elif os.path.isfile(pyproject_path) or os.path.isfile(setup_path):
+            log("Wykryto projekt Python (pyproject.toml lub setup.py).")
+            if not ensure_python():
+                return
+            log("Instaluję zależności: pip install .")
+            exit_code = run_cmd([sys.executable, "-m", "pip", "install", "."], cwd=target_dir)
             if exit_code != 0:
                 log_error("Błąd podczas instalowania zależności pip!")
                 return
@@ -233,7 +247,7 @@ def do_workflow(repo_url):
         progress()
 
         # 5. Uruchomienie projektu
-        if os.path.isfile(req_path):
+        if os.path.isfile(req_path) or os.path.isfile(pyproject_path) or os.path.isfile(setup_path):
             entry_py = find_python_entrypoint(target_dir)
             if entry_py:
                 log(f"Uruchamiam {entry_py} ...")
@@ -242,8 +256,24 @@ def do_workflow(repo_url):
                 msg = "Nie znaleziono pliku startowego Python – projekt nie został uruchomiony."
                 log_error(msg)
         elif os.path.isfile(pkg_path):
-            log("Uruchamiam npm start ...")
-            run_cmd(["npm", "start"], cwd=target_dir, shell=True)
+            try:
+                with open(pkg_path, "r", encoding="utf-8") as f:
+                    pkg_data = json.load(f)
+            except Exception:
+                pkg_data = {}
+
+            start_script = pkg_data.get("scripts", {}).get("start")
+            main_entry = pkg_data.get("main")
+
+            if start_script:
+                log("Uruchamiam npm start ...")
+                run_cmd(["npm", "start"], cwd=target_dir)
+            elif main_entry:
+                log(f"Uruchamiam node {main_entry} ...")
+                run_cmd(["node", main_entry], cwd=target_dir)
+            else:
+                msg = "Brak skryptu start w package.json – projekt nie został uruchomiony."
+                log_error(msg)
         step_idx += 1
         progress()
         log("Gotowe!")
