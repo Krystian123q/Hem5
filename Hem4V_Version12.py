@@ -91,7 +91,8 @@ def ensure_git():
         return install_git()
 
 def ensure_python():
-    if check_exe("python"):
+    """Ensure that at least one Python interpreter is available."""
+    if check_exe("python") or check_exe("python3"):
         log("Python jest zainstalowany.")
         return True
     else:
