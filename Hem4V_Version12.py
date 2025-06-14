@@ -140,26 +140,31 @@ def parse_repo_name(repo_url):
     return name
 
 def find_python_entrypoint(target_dir):
-    candidates = ["main.py", "app.py", "index.py"]
+    """Return a likely Python entrypoint in target_dir or None."""
+    candidates = [
+        "launch.py",
+        "webui.py",
+        "main.py",
+        "app.py",
+        "index.py",
+        "run.py",
+    ]
     for fname in candidates:
         path = os.path.join(target_dir, fname)
         if os.path.isfile(path):
             return fname
-    pyfiles = [os.path.basename(f) for f in glob.glob(os.path.join(target_dir, "*.py")) if os.path.basename(f) != "setup.py"]
+
+    pyfiles = [
+        os.path.basename(f)
+        for f in glob.glob(os.path.join(target_dir, "*.py"))
+        if os.path.basename(f) != "setup.py"
+    ]
     if len(pyfiles) == 1:
         return pyfiles[0]
     elif len(pyfiles) > 1:
-        print("Nie znaleziono jednoznacznego pliku startowego. Możliwe pliki:")
-        for idx, f in enumerate(pyfiles):
-            print(f"{idx+1}. {f}")
-        while True:
-            try:
-                choice = int(input("Podaj numer pliku do uruchomienia: "))
-                if 1 <= choice <= len(pyfiles):
-                    return pyfiles[choice-1]
-            except Exception:
-                pass
-            print("Nieprawidłowy wybór.")
+        # choose the first file alphabetically to avoid interactive prompts
+        pyfiles.sort()
+        return pyfiles[0]
     else:
         return None
 
