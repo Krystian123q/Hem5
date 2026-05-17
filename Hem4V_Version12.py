@@ -3,12 +3,15 @@ import sys
 import subprocess
 import shutil
 import urllib.request
+import json
+import fnmatch
 import tempfile
 import traceback
 import glob
 from datetime import datetime
 
-WORKDIR = r"C:\Hem4V"
+# Use a cross-platform directory inside the user's home folder
+WORKDIR = os.path.join(os.path.expanduser("~"), "Hem4V")
 LOGDIR = os.path.join(WORKDIR, "logs")
 LOGFILE = os.path.join(LOGDIR, f"log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
 
@@ -89,7 +92,8 @@ def ensure_git():
         return install_git()
 
 def ensure_python():
-    if check_exe("python"):
+    """Ensure that at least one Python interpreter is available."""
+    if check_exe("python") or check_exe("python3"):
         log("Python jest zainstalowany.")
         return True
     else:
@@ -138,28 +142,47 @@ def parse_repo_name(repo_url):
     return name
 
 def find_python_entrypoint(target_dir):
-    candidates = ["main.py", "app.py", "index.py"]
+    """Return a likely Python entrypoint in target_dir or None."""
+    candidates = [
+        "launch.py",
+        "webui.py",
+        "main.py",
+        "app.py",
+        "index.py",
+        "run.py",
+    ]
     for fname in candidates:
         path = os.path.join(target_dir, fname)
         if os.path.isfile(path):
             return fname
-    pyfiles = [os.path.basename(f) for f in glob.glob(os.path.join(target_dir, "*.py"))]
+
+    pyfiles = [
+        os.path.basename(f)
+        for f in glob.glob(os.path.join(target_dir, "*.py"))
+        if os.path.basename(f) != "setup.py"
+    ]
     if len(pyfiles) == 1:
         return pyfiles[0]
     elif len(pyfiles) > 1:
-        print("Nie znaleziono jednoznacznego pliku startowego. Możliwe pliki:")
-        for idx, f in enumerate(pyfiles):
-            print(f"{idx+1}. {f}")
-        while True:
-            try:
-                choice = int(input("Podaj numer pliku do uruchomienia: "))
-                if 1 <= choice <= len(pyfiles):
-                    return pyfiles[choice-1]
-            except Exception:
-                pass
-            print("Nieprawidłowy wybór.")
+        # choose the first file alphabetically to avoid interactive prompts
+        pyfiles.sort()
+        return pyfiles[0]
     else:
         return None
+
+def find_project_file(base_dir, patterns):
+    """Search recursively for a file matching one of `patterns`.
+
+    Each pattern can include wildcards as understood by fnmatch.
+    Returns the absolute path of the first match or None.
+    """
+    for root_dir, dirs, files in os.walk(base_dir):
+        for pattern in patterns:
+            for fname in files:
+                if fnmatch.fnmatch(fname, pattern):
+                    return os.path.join(root_dir, fname)
+    return None
+
 
 def do_workflow(repo_url):
     step_idx = 0
@@ -205,45 +228,87 @@ def do_workflow(repo_url):
         progress()
 
         # 4. Instalacja zależności
-        req_path = os.path.join(target_dir, "requirements.txt")
-        pkg_path = os.path.join(target_dir, "package.json")
-        if os.path.isfile(req_path):
+        req_path = find_project_file(target_dir, ["requirements.txt", "requirements*.txt"])
+        pyproject_path = find_project_file(target_dir, ["pyproject.toml"])
+        setup_path = find_project_file(target_dir, ["setup.py"])
+        pkg_path = find_project_file(target_dir, ["package.json"])
+
+        req_dir = os.path.dirname(req_path) if req_path else None
+        py_dir = os.path.dirname(pyproject_path) if pyproject_path else None
+        setup_dir = os.path.dirname(setup_path) if setup_path else None
+        pkg_dir = os.path.dirname(pkg_path) if pkg_path else None
+        launch_py = find_project_file(target_dir, ["launch.py"]) or None
+        bash_launch = find_project_file(target_dir, ["webui.sh", "start.sh"]) or None
+
+        installed = False
+        if req_path:
             log("Wykryto projekt Python (requirements.txt).")
             if not ensure_python():
                 return
-            log("Instaluję zależności: pip install -r requirements.txt")
-            exit_code = run_cmd([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], cwd=target_dir)
+            log(f"Instaluję zależności: pip install -r {os.path.basename(req_path)}")
+            exit_code = run_cmd([sys.executable, "-m", "pip", "install", "-r", os.path.basename(req_path)], cwd=req_dir)
             if exit_code != 0:
                 log_error("Błąd podczas instalowania zależności pip!")
                 return
-        elif os.path.isfile(pkg_path):
+            installed = True
+        elif pyproject_path or setup_path:
+            log("Wykryto projekt Python (pyproject.toml lub setup.py).")
+            if not ensure_python():
+                return
+            log("Instaluję zależności: pip install .")
+            install_dir = py_dir or setup_dir
+            exit_code = run_cmd([sys.executable, "-m", "pip", "install", "."], cwd=install_dir)
+            if exit_code != 0:
+                log_error("Błąd podczas instalowania zależności pip!")
+                return
+            installed = True
+        elif pkg_path:
             log("Wykryto projekt Node.js (package.json).")
             if not ensure_npm():
                 return
             log("Instaluję zależności npm ...")
-            exit_code = run_cmd(["npm", "install"], cwd=target_dir)
+            exit_code = run_cmd(["npm", "install"], cwd=pkg_dir)
             if exit_code != 0:
                 log_error("Błąd podczas npm install!")
                 return
+            installed = True
         else:
-            msg = "Nie wykryto obsługiwanej technologii (brak requirements.txt / package.json)!"
-            log_error(msg)
-            return
+            log("Nie znaleziono pliku z zależnościami – pomijam instalację.")
         step_idx += 1
         progress()
 
         # 5. Uruchomienie projektu
-        if os.path.isfile(req_path):
-            entry_py = find_python_entrypoint(target_dir)
+        if req_path or pyproject_path or setup_path or launch_py:
+            run_dir = os.path.dirname(req_path or pyproject_path or setup_path or launch_py)
+            entry_py = find_python_entrypoint(run_dir)
             if entry_py:
                 log(f"Uruchamiam {entry_py} ...")
-                run_cmd([sys.executable, entry_py], cwd=target_dir)
+                run_cmd([sys.executable, entry_py], cwd=run_dir)
             else:
                 msg = "Nie znaleziono pliku startowego Python – projekt nie został uruchomiony."
                 log_error(msg)
-        elif os.path.isfile(pkg_path):
-            log("Uruchamiam npm start ...")
-            run_cmd(["npm", "start"], cwd=target_dir, shell=True)
+        elif bash_launch:
+            log(f"Uruchamiam skrypt {os.path.basename(bash_launch)} ...")
+            run_cmd(["bash", os.path.basename(bash_launch)], cwd=os.path.dirname(bash_launch))
+        elif pkg_path:
+            try:
+                with open(pkg_path, "r", encoding="utf-8") as f:
+                    pkg_data = json.load(f)
+            except Exception:
+                pkg_data = {}
+
+            start_script = pkg_data.get("scripts", {}).get("start")
+            main_entry = pkg_data.get("main")
+
+            if start_script:
+                log("Uruchamiam npm start ...")
+                run_cmd(["npm", "start"], cwd=pkg_dir)
+            elif main_entry:
+                log(f"Uruchamiam node {main_entry} ...")
+                run_cmd(["node", main_entry], cwd=pkg_dir)
+            else:
+                msg = "Brak skryptu start w package.json – projekt nie został uruchomiony."
+                log_error(msg)
         step_idx += 1
         progress()
         log("Gotowe!")
